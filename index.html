@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Calm-It Reminders</title>
+  <link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+  <div class="wrap">
+    <header class="page-header">
+      <h1>Calm-It Reminders</h1>
+      <div class="actions">
+        <button id="notifyBtn" title="Enable browser notifications">Enable Notifications</button>
+        <button id="clearBtn" class="danger" title="Remove all reminders">Clear All</button>
+      </div>
+    </header>
+
+    <section class="card">
+      <h3>Add Reminder</h3>
+      <form id="addForm" class="row">
+        <input id="msg" type="text" placeholder="Message (e.g., Hey buddy—think before you speak!)" required/>
+        <input id="time" type="time" required/>
+        <button type="submit">Add</button>
+      </form>
+      <p class="hint">Reminders repeat every day at the set time. Page can be open in a pinned tab.</p>
+    </section>
+
+    <section class="card">
+      <h3>Today's Reminders</h3>
+      <div id="list" class="list"></div>
+    </section>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <footer class="footer">
+      <small>Data saved locally • Notifications require permission • Fallback shows in-page banner</small>
+    </footer>
+  </div>
+
+<script>
+const STORAGE_KEY = 'calmit_reminders_v1';
+const SENT_KEY = 'calmit_sent_'+new Date().toISOString().slice(0,10); // YYYY-MM-DD
+let reminders = loadReminders();
+let sent = loadSentForToday();
+
+function loadReminders(){
+  try {
+    const v = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    if (Array.isArray(v) && v.length) return v;
+    // seed with a couple Jared-specials
+    const seed = [
+      { id:id(), msg:"Hey buddy — think before you speak.", time:"08:30" },
+      { id:id(), msg:"Calm it before you bomb it. 30 air squats. Break, then respond.", time:"12:30" },
+      { id:id(), msg:"Detach. Choose peace over winning the moment.", time:"19:30" },
+    ];
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(seed));
+    return seed;
+  } catch { return []; }
+}
+function saveReminders(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(reminders)); }
+function loadSentForToday(){
+  try { return JSON.parse(localStorage.getItem(SENT_KEY) || '{}'); }
+  catch { return {}; }
+}
+function saveSent(){ localStorage.setItem(SENT_KEY, JSON.stringify(sent)); }
+
+function id(){ return 'r_'+Math.random().toString(36).slice(2,9); }
+function hhmm(d=new Date()){
+  const h = String(d.getHours()).padStart(2,'0');
+  const m = String(d.getMinutes()).padStart(2,'0');
+  return `${h}:${m}`;
+}
+function render(){
+  const list = document.getElementById('list');
+  if (!reminders.length){ list.innerHTML = '<p class="muted">No reminders yet.</p>'; return; }
+  list.innerHTML = reminders
+    .sort((a,b)=>a.time.localeCompare(b.time))
+    .map(r=>`
+      <div class="item" data-id="${r.id}">
+        <div class="item-main">
+          <div class="time">${r.time}</div>
+          <div class="msg">${escapeHtml(r.msg)}</div>
+        </div>
+        <div class="item-ctl">
+          <button class="sm edit">Edit</button>
+          <button class="sm danger del">Delete</button>
+        </div>
+      </div>
+    `).join('');
+}
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+document.getElementById('addForm').addEventListener('submit', e=>{
+  e.preventDefault();
+  const msg = document.getElementById('msg').value.trim();
+  const time = document.getElementById('time').value;
+  if(!msg || !time) return;
+  reminders.push({ id:id(), msg, time });
+  saveReminders();
+  e.target.reset();
+  render();
+});
+
+document.getElementById('list').addEventListener('click', e=>{
+  const row = e.target.closest('.item'); if(!row) return;
+  const rid = row.dataset.id;
+  const idx = reminders.findIndex(r=>r.id===rid);
+  if(idx<0) return;
+
+  if(e.target.classList.contains('del')){
+    reminders.splice(idx,1);
+    saveReminders(); render(); return;
+  }
+  if(e.target.classList.contains('edit')){
+    const cur = reminders[idx];
+    const newMsg = prompt('Edit message:', cur.msg);
+    if(newMsg===null) return;
+    const newTime = prompt('Edit time (HH:MM):', cur.time);
+    if(newTime===null) return;
+    if(!/^\d{2}:\d{2}$/.test(newTime)) { alert('Time must be HH:MM'); return; }
+    reminders[idx] = { ...cur, msg:newMsg.trim(), time:newTime };
+    saveReminders(); render(); return;
+  }
+});
+
+document.getElementById('clearBtn').onclick = ()=>{
+  if(!confirm('Delete ALL reminders?')) return;
+  reminders = []; saveReminders(); render();
+};
+
+document.getElementById('notifyBtn').onclick = async ()=>{
+  try{
+    if(!('Notification' in window)) { alert('Notifications not supported in this browser.'); return; }
+    const perm = await Notification.requestPermission();
+    if(perm!=='granted'){ alert('Notifications not enabled. I will use in-page banners.'); }
+    else { miniToast('Notifications enabled'); }
+  }catch(err){ console.error(err); }
+};
+
+// scheduler: check every 20s to hit exact minute reliably even if timer drifts
+setInterval(tick, 20000);
+tick(); // start now
+
+function tick(){
+  const now = new Date();
+  // reset "sent" map on day change
+  const key = 'calmit_sent_'+now.toISOString().slice(0,10);
+  if (key !== Object.keys(localStorage).find(k=>k===SENT_KEY)) {
+    // new day -> reset
+    sent = {}; saveSent();
+  }
+  const cur = hhmm(now);
+  reminders.forEach(r=>{
+    if (r.time === cur && !sent[r.id]) {
+      sendReminder(r.msg);
+      sent[r.id] = true;
+      saveSent();
+    }
+  });
+}
+
+function sendReminder(text){
+  // try Notification API first
+  if('Notification' in window && Notification.permission==='granted'){
+    new Notification('Reminder', { body: text });
+  } else {
+    // fallback: in-page toast
+    miniToast(text);
+  }
+}
+
+let toastTimer=null;
+function miniToast(text){
+  const t = document.getElementById('toast');
+  t.textContent = text;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>t.classList.remove('show'), 4500);
+}
+
+render();
+</script>
+</body>
+</html>
